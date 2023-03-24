@@ -46,7 +46,7 @@ pub fn master_from_pre_master(
     for i in 1..=3 {
         let mut hasher = sha1::Sha1::new();
         for _ in 0..i {
-            hasher.update(&[b'A' + i - 1]);
+            hasher.update([b'A' + i - 1]);
         }
         hasher.update(pre_master_secret);
         hasher.update(client_random);
@@ -54,7 +54,7 @@ pub fn master_from_pre_master(
         let sha: [u8; 20] = hasher.finalize().into();
         let mut hasher = md5::Md5::new();
         hasher.update(pre_master_secret);
-        hasher.update(&sha);
+        hasher.update(sha);
         let md5: [u8; 16] = hasher.finalize().into();
         master_secret.extend(md5);
     }
@@ -80,7 +80,7 @@ impl Keys {
         for i in 1.. {
             let mut hasher = sha1::Sha1::new();
             for _ in 0..i {
-                hasher.update(&[b'A' + i - 1]);
+                hasher.update([b'A' + i - 1]);
             }
             hasher.update(master_secret);
             hasher.update(server_random);
@@ -88,7 +88,7 @@ impl Keys {
             let sha: [u8; 20] = hasher.finalize().into();
             let mut hasher = md5::Md5::new();
             hasher.update(master_secret);
-            hasher.update(&sha);
+            hasher.update(sha);
             let md5: [u8; 16] = hasher.finalize().into();
             key_block.extend(md5);
             if key_block.len() >= 20 + 20 + 16 + 16 {
@@ -161,8 +161,8 @@ impl Hmac {
     }
     pub fn get_hash_len(&self) -> usize {
         match self {
-            Self::Md5(key) => 16,
-            Self::Sha(key) => 20,
+            Self::Md5(_) => 16,
+            Self::Sha(_) => 20,
         }
     }
 }

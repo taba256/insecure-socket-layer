@@ -10,6 +10,7 @@ pub struct ServerConfig {
     pub sessions: RwLock<HashMap<Vec<u8>, ()>>,
 }
 
+#[derive(Default)]
 pub struct ServerConfigBuilder {
     certs: Vec<Vec<u8>>,
     private_key: Option<RsaPrivateKey>,

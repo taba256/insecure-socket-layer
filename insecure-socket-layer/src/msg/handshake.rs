@@ -213,7 +213,7 @@ impl Finished {
         let mut hasher = md5::Md5::new();
         hasher.update(master_secret);
         hasher.update(
-            &(if is_client {
+            (if is_client {
                 0x434C4E54u32
             } else {
                 0x53525652u32
@@ -225,7 +225,7 @@ impl Finished {
         let mut hasher = sha1::Sha1::new();
         hasher.update(master_secret);
         hasher.update(
-            &(if is_client {
+            (if is_client {
                 0x434C4E54u32
             } else {
                 0x53525652u32

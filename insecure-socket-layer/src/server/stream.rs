@@ -8,7 +8,6 @@ use crate::{
 };
 use rc4::StreamCipher;
 use std::{
-    collections::VecDeque,
     io::{Read, Write},
     sync::Arc,
 };
@@ -77,10 +76,11 @@ where
         )?;
 
         let Message::Handshake(Handshake::ClientKeyExchange(client_key_exchange)) = self.read_next_message(Some(&mut handshake_messages))? else {return Err(crate::error::Error::Handshake("ClientKeyExchange".into()))};
-        let mut pre_master_secret = client_key_exchange;
-        self.config
+        let pre_master_secret = client_key_exchange;
+        let pre_master_secret = self
+            .config
             .private_key
-            .decrypt(rsa::Pkcs1v15Encrypt, &mut pre_master_secret)
+            .decrypt(rsa::Pkcs1v15Encrypt, &pre_master_secret)
             .expect("RSA decryption failed");
 
         let master_secret =
@@ -95,12 +95,12 @@ where
             &server_random,
         );
 
-        let Message::ChangeCipherSpec = self.read_next_message(Some(&mut handshake_messages))? else {return Err(crate::error::Error::Handshake("ChangeCipherSpec".into()))};
+        let Message::ChangeCipherSpec = self.read_next_message(None)? else {return Err(crate::error::Error::Handshake("ChangeCipherSpec".into()))};
         self.decrypter = Some((keys.client_write_key, keys.client_write_mac));
 
-        let Message::Handshake(Handshake::Finished(client_finished)) = self.read_next_message(Some(&mut handshake_messages))? else {return Err(crate::error::Error::Handshake("ClientKeyExchange".into()))};
+        let Message::Handshake(Handshake::Finished(_client_finished)) = self.read_next_message(Some(&mut handshake_messages))? else {return Err(crate::error::Error::Handshake("ClientKeyExchange".into()))};
 
-        self.write_message(Message::ChangeCipherSpec, Some(&mut handshake_messages))?;
+        self.write_message(Message::ChangeCipherSpec, None)?;
         self.encrypter = Some((keys.server_write_key, keys.server_write_mac));
 
         let server_finished = Finished::new(&master_secret, false, &handshake_messages);
@@ -117,13 +117,13 @@ where
 
         let input = &mut Reader::new(&record_header);
         let content_type = u8::decode(input)?;
-        let protocol_version = ProtocolVersion::decode(input)?;
+        let _protocol_version = ProtocolVersion::decode(input)?;
         let fragment_size = u16::decode(input)? as usize;
 
         let mut fragment = vec![0; fragment_size];
         self.stream.read_exact(&mut fragment)?;
 
-        if let Some((decrypter, hmac)) = &mut self.decrypter {
+        if let Some((decrypter, _)) = &mut self.decrypter {
             decrypter.apply_keystream(&mut fragment);
         }
 
@@ -145,12 +145,17 @@ where
                 return Ok(msg);
             }
             let (content_type, fragment) = self.read_ssl_record_fragment()?;
-            let available_message_num = self.defrag.extend_buffer(content_type, &fragment)?;
             if let Some(ref mut raw_message) = &mut raw_message {
                 if content_type == 22 {
                     raw_message.extend(&fragment);
                 }
             }
+            let fragment = if let Some((_, hmac)) = &self.decrypter {
+                &fragment[fragment.len() - hmac.get_hash_len()..]
+            } else {
+                &fragment
+            };
+            let _available_message_num = self.defrag.extend_buffer(content_type, fragment)?;
         }
     }
     fn write_message(
@@ -177,7 +182,7 @@ where
             content_type.encode(header);
             ProtocolVersion::Ssl30.encode(header);
             (chunk.len() as u16).encode(header);
-            self.stream.write_all(&header)?;
+            self.stream.write_all(header)?;
             self.stream.write_all(&chunk)?;
         }
         self.stream.flush()?;
