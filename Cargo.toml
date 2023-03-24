@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "insecure-socket-layer",
+    "test-server",
+    "test-client",
+]
