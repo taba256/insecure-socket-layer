@@ -1,13 +1,15 @@
+use crate::cipher::*;
 use rsa::RsaPrivateKey;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
 
+pub type SessionResumeData = (CipherSuite, Vec<u8>);
 pub struct ServerConfig {
     pub certs: Vec<Vec<u8>>,
-    pub private_key: RsaPrivateKey,
-    pub sessions: RwLock<HashMap<Vec<u8>, ()>>,
+    pub(crate) private_key: RsaPrivateKey,
+    pub(crate) sessions: RwLock<HashMap<Vec<u8>, SessionResumeData>>,
 }
 impl ServerConfig {
     pub fn clone(self: &Arc<Self>) -> Arc<Self> {

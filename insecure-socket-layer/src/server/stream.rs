@@ -53,6 +53,46 @@ where
             cipher_suite,
         } = client_hello;
 
+        let prev_session = self
+            .config
+            .sessions
+            .read()
+            .unwrap()
+            .get(&session_id)
+            .cloned();
+        if let Some((cipher_suite, master_secret)) = prev_session {
+            // セッション再開
+            let server_hello = ServerHello::new(&session_id, cipher_suite);
+            let server_random = server_hello.random_bytes;
+            self.write_message(
+                Message::Handshake(Handshake::ServerHello(server_hello)),
+                Some(&mut handshake_messages),
+            )?;
+            let keys = Keys::new(
+                cipher_suite.into(),
+                &master_secret,
+                &client_random,
+                &server_random,
+            );
+
+            self.write_message(Message::ChangeCipherSpec, None)?;
+            self.encrypter = Some((keys.server_write_key, keys.server_write_mac));
+
+            let server_finished = Finished::new(&master_secret, false, &handshake_messages);
+            self.write_message(
+                Message::Handshake(Handshake::Finished(server_finished)),
+                None,
+            )?;
+
+            let Message::ChangeCipherSpec = self.read_next_message(None)? else {return Err(crate::error::Error::Handshake("ChangeCipherSpec".into()))};
+            self.decrypter = Some((keys.client_write_key, keys.client_write_mac));
+
+            let Message::Handshake(Handshake::Finished(_client_finished)) = self.read_next_message(Some(&mut handshake_messages))? else {return Err(crate::error::Error::Handshake("ClientKeyExchange".into()))};
+
+            return Ok(());
+        }
+
+        // 新規セッション
         let cipher_suite = if cipher_suite.contains(&CipherSuite::RsaWithRc4_128Sha) {
             CipherSuite::RsaWithRc4_128Sha
         } else if cipher_suite.contains(&CipherSuite::RsaWithRc4_128Md5) {
@@ -64,6 +104,7 @@ where
         };
         let server_hello = ServerHello::new(&[], cipher_suite);
         let server_random = server_hello.random_bytes;
+        let session_id = server_hello.session_id.clone();
         self.write_message(
             Message::Handshake(Handshake::ServerHello(server_hello)),
             Some(&mut handshake_messages),
@@ -113,6 +154,12 @@ where
             Message::Handshake(Handshake::Finished(server_finished)),
             None,
         )?;
+
+        self.config
+            .sessions
+            .write()
+            .unwrap()
+            .insert(session_id, (cipher_suite, master_secret));
 
         Ok(())
     }
