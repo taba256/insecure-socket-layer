@@ -8,6 +8,7 @@ use crate::{
 };
 use rc4::StreamCipher;
 use std::{
+    collections::VecDeque,
     io::{Read, Write},
     sync::Arc,
 };
@@ -19,6 +20,8 @@ pub struct ServerStream<S> {
     disabled: bool,
     decrypter: Option<(rc4::Rc4<rc4::consts::U16>, Hmac)>,
     encrypter: Option<(rc4::Rc4<rc4::consts::U16>, Hmac)>,
+    application_read_buffer: VecDeque<u8>,
+    application_write_buffer: VecDeque<u8>,
 }
 impl<S> ServerStream<S>
 where
@@ -32,6 +35,8 @@ where
             disabled: false,
             decrypter: None,
             encrypter: None,
+            application_read_buffer: VecDeque::new(),
+            application_write_buffer: VecDeque::new(),
         };
         s.handshake()?;
         Ok(s)
@@ -57,7 +62,7 @@ where
                 "no available cipher suite".into(),
             ));
         };
-        let server_hello = ServerHello::new(&session_id, cipher_suite);
+        let server_hello = ServerHello::new(&[], cipher_suite);
         let server_random = server_hello.random_bytes;
         self.write_message(
             Message::Handshake(Handshake::ServerHello(server_hello)),
@@ -145,16 +150,19 @@ where
                 return Ok(msg);
             }
             let (content_type, fragment) = self.read_ssl_record_fragment()?;
-            if let Some(ref mut raw_message) = &mut raw_message {
-                if content_type == 22 {
-                    raw_message.extend(&fragment);
-                }
-            }
-            let fragment = if let Some((_, hmac)) = &self.decrypter {
-                &fragment[fragment.len() - hmac.get_hash_len()..]
+            let fragment = if let Some((_, hmac)) = &mut self.decrypter {
+                let message = &fragment[..fragment.len() - hmac.get_hash_len()];
+                let mac = &fragment[fragment.len() - hmac.get_hash_len()..];
+                assert_eq!(&hmac.get_auth_code(content_type, message), mac);
+                message
             } else {
                 &fragment
             };
+            if let Some(ref mut raw_message) = &mut raw_message {
+                if content_type == 22 {
+                    raw_message.extend(fragment);
+                }
+            }
             let _available_message_num = self.defrag.extend_buffer(content_type, fragment)?;
         }
     }
@@ -174,7 +182,7 @@ where
         for chunk in bytes.chunks(16384) {
             let mut chunk = chunk.to_vec();
             if let Some((encrypter, hmac)) = &mut self.encrypter {
-                let mac = hmac.get_auth_code(&chunk);
+                let mac = hmac.get_auth_code(content_type, &chunk);
                 chunk.extend(mac);
                 encrypter.apply_keystream(&mut chunk);
             }
@@ -188,17 +196,98 @@ where
         self.stream.flush()?;
         Ok(())
     }
-}
-impl<S> Read for ServerStream<S> {
-    fn read(&mut self, _: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
-        todo!()
+    fn send_application_data(&mut self) -> Result<usize> {
+        if self.application_write_buffer.is_empty() {
+            return Ok(0);
+        }
+        let write_size = std::cmp::min(self.application_write_buffer.len(), 16384);
+        let v = self
+            .application_write_buffer
+            .drain(..write_size)
+            .collect::<Vec<u8>>();
+        let message = Message::ApplicationData(v);
+        self.write_message(message, None)?;
+        Ok(write_size)
     }
 }
-impl<S> Write for ServerStream<S> {
-    fn write(&mut self, _: &[u8]) -> std::result::Result<usize, std::io::Error> {
-        todo!()
+impl<S> Read for ServerStream<S>
+where
+    S: Read + Write,
+{
+    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
+        loop {
+            if self.disabled {
+                // todo 切断された理由によってOkとErrを切り替えたほうがよろしいのでは？
+                return Ok(0);
+            }
+            if !self.application_read_buffer.is_empty() {
+                let read_size = std::cmp::min(buf.len(), self.application_read_buffer.len());
+                buf.iter_mut()
+                    .take(read_size)
+                    .for_each(|b| *b = self.application_read_buffer.pop_front().unwrap());
+                return Ok(read_size);
+            }
+            let message = match self.read_next_message(None) {
+                Ok(msg) => msg,
+                Err(crate::error::Error::Io(e)) => {
+                    self.disabled = true;
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.disabled = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        e,
+                    ));
+                }
+            };
+            if let Message::ApplicationData(data) = message {
+                self.application_read_buffer.extend(data);
+            }
+        }
+    }
+}
+impl<S> Write for ServerStream<S>
+where
+    S: Read + Write,
+{
+    fn write(&mut self, buf: &[u8]) -> std::result::Result<usize, std::io::Error> {
+        self.application_write_buffer.extend(buf);
+        while self.application_write_buffer.len() >= 16384 {
+            match self.send_application_data() {
+                Ok(..) => {}
+                Err(crate::error::Error::Io(e)) => {
+                    self.disabled = true;
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.disabled = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        e,
+                    ));
+                }
+            }
+        }
+        Ok(buf.len())
     }
     fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
-        todo!()
+        while !self.application_write_buffer.is_empty() {
+            match self.send_application_data() {
+                Ok(_) => (),
+                Err(crate::error::Error::Io(e)) => {
+                    self.disabled = true;
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.disabled = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        e,
+                    ));
+                }
+            };
+        }
+        Ok(())
     }
 }

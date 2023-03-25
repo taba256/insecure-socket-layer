@@ -13,7 +13,7 @@ impl From<CipherSuite> for HashAlgo {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum CipherSuite {
     RsaWithRc4_128Md5 = 0x0004,
@@ -102,6 +102,7 @@ impl Keys {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
+                0,
             ),
             HashAlgo::Sha => Hmac::Sha(
                 key_block
@@ -109,6 +110,7 @@ impl Keys {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
+                0,
             ),
         };
         let server_write_mac = match algo {
@@ -118,6 +120,7 @@ impl Keys {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
+                0,
             ),
             HashAlgo::Sha => Hmac::Sha(
                 key_block
@@ -125,6 +128,7 @@ impl Keys {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
+                0,
             ),
         };
         use rc4::KeyInit;
@@ -140,29 +144,51 @@ impl Keys {
     }
 }
 pub enum Hmac {
-    Md5([u8; 16]),
-    Sha([u8; 20]),
+    Md5([u8; 16], u64),
+    Sha([u8; 20], u64),
 }
 impl Hmac {
-    pub fn get_auth_code(&self, message: &[u8]) -> Vec<u8> {
-        use hmac::Mac;
+    pub fn get_auth_code(&mut self, content_type: u8, message: &[u8]) -> Vec<u8> {
+        use md5::Digest;
         match self {
-            Self::Md5(key) => {
-                let mut mac = hmac::Hmac::<md5::Md5>::new_from_slice(key).unwrap();
-                mac.update(message);
-                mac.finalize().into_bytes().to_vec()
+            Self::Md5(key, seq) => {
+                let mut hasher = md5::Md5::new();
+                hasher.update(&key);
+                hasher.update([0x36; 48]);
+                hasher.update(seq.to_be_bytes());
+                hasher.update([content_type]);
+                hasher.update((message.len() as u16).to_be_bytes());
+                hasher.update(message);
+                let md5_hash: [u8; 16] = hasher.finalize().into();
+                let mut hasher = md5::Md5::new();
+                hasher.update(key);
+                hasher.update([0x5c; 48]);
+                hasher.update(md5_hash);
+                *seq += 1;
+                hasher.finalize().to_vec()
             }
-            Self::Sha(key) => {
-                let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(key).unwrap();
-                mac.update(message);
-                mac.finalize().into_bytes().to_vec()
+            Self::Sha(key, seq) => {
+                let mut hasher = sha1::Sha1::new();
+                hasher.update(&key);
+                hasher.update([0x36; 40]);
+                hasher.update(seq.to_be_bytes());
+                hasher.update([content_type]);
+                hasher.update((message.len() as u16).to_be_bytes());
+                hasher.update(message);
+                let sha_hash: [u8; 20] = hasher.finalize().into();
+                let mut hasher = sha1::Sha1::new();
+                hasher.update(key);
+                hasher.update([0x5c; 40]);
+                hasher.update(sha_hash);
+                *seq += 1;
+                hasher.finalize().to_vec()
             }
         }
     }
     pub fn get_hash_len(&self) -> usize {
         match self {
-            Self::Md5(_) => 16,
-            Self::Sha(_) => 20,
+            Self::Md5(..) => 16,
+            Self::Sha(..) => 20,
         }
     }
 }

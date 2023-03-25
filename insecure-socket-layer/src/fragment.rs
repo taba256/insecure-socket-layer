@@ -30,7 +30,7 @@ impl RecordDefragContext {
                 Err(DecodeError::NeedMoreData) => {
                     // データがデコードに足りない場合、次のfragmentを追加すれば行けるかもしれない
                     // よってリターンしてよい
-                    break;
+                    return Ok(self.messages.len());
                 }
                 Err(DecodeError::InvalidData) => return Err(DecodeError::InvalidData.into()),
             }

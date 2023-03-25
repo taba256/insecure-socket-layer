@@ -58,7 +58,7 @@ impl Codec for Handshake {
             2 => Ok(Self::ServerHello(ServerHello::decode(msg_body)?)),
             11 => Ok(Self::Certificate(Certificate::decode(msg_body)?)),
             14 if msg_body.is_eof() => Ok(Self::ServerHelloDone),
-            16 => Ok(Self::ClientKeyExchange(msg_body.remain()?.to_vec())),
+            16 => Ok(Self::ClientKeyExchange(msg_body.take(msg_length)?.to_vec())),
             20 => Ok(Self::Finished(Finished::decode(msg_body)?)),
             _ => Err(DecodeError::InvalidData),
         }
@@ -102,11 +102,22 @@ impl Codec for ClientHello {
             .try_into()
             .map_err(|_| DecodeError::InvalidData)?;
         let session_id = decode_vec::<u8, 1>(input)?;
-        let cipher_suite = decode_vec::<CipherSuite, 2>(input)?;
+        let cipher_suite = decode_vec::<u16, 2>(input)?
+            .into_iter()
+            .filter_map(|r| {
+                if r == CipherSuite::RsaWithRc4_128Md5 as u16 {
+                    Some(CipherSuite::RsaWithRc4_128Md5)
+                } else if r == CipherSuite::RsaWithRc4_128Sha as u16 {
+                    Some(CipherSuite::RsaWithRc4_128Sha)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<CipherSuite>>();
         let _compression_method = decode_vec::<u8, 1>(input)?;
 
         if protocol != ProtocolVersion::Ssl30 {
-            return Err(DecodeError::InvalidData);
+            //return Err(DecodeError::InvalidData);
         }
         Ok(ClientHello {
             random_bytes,
@@ -130,7 +141,7 @@ impl ServerHello {
         rng.fill(&mut random_bytes[4..]);
         let session_id = if session_id.is_empty() {
             let mut session_id = vec![0; 32];
-            rng.fill(&mut session_id[4..]);
+            rng.fill(&mut session_id[..]);
             session_id
         } else {
             session_id[..32].to_vec()
@@ -211,7 +222,7 @@ impl Finished {
         use md5::Digest;
         //use sha1::Digest;
         let mut hasher = md5::Md5::new();
-        hasher.update(master_secret);
+        hasher.update(handshake_messages);
         hasher.update(
             (if is_client {
                 0x434C4E54u32
@@ -220,20 +231,34 @@ impl Finished {
             })
             .to_be_bytes(),
         );
-        hasher.update(handshake_messages);
+        hasher.update(master_secret);
+        hasher.update([0x36; 48]);
         let md5_hash: [u8; 16] = hasher.finalize().into();
+        let mut hasher = md5::Md5::new();
+        hasher.update(master_secret);
+        hasher.update([0x5c; 48]);
+        hasher.update(md5_hash);
+        let md5_hash: [u8; 16] = hasher.finalize().into();
+
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(handshake_messages);
+        hasher.update(
+            (if is_client {
+                0x434C4E54u32
+            } else {
+                0x53525652u32
+            })
+            .to_be_bytes(),
+        );
+        hasher.update(master_secret);
+        hasher.update([0x36; 40]);
+        let sha_hash: [u8; 20] = hasher.finalize().into();
         let mut hasher = sha1::Sha1::new();
         hasher.update(master_secret);
-        hasher.update(
-            (if is_client {
-                0x434C4E54u32
-            } else {
-                0x53525652u32
-            })
-            .to_be_bytes(),
-        );
-        hasher.update(handshake_messages);
+        hasher.update([0x5c; 40]);
+        hasher.update(sha_hash);
         let sha_hash: [u8; 20] = hasher.finalize().into();
+
         Self { md5_hash, sha_hash }
     }
 }
